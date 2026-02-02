@@ -633,8 +633,8 @@ def build_parent_tree_from_results(results, stations_ranked=None):
                 continue
 
         # arbre => un seul parent par enfant
-        if y in parent_of:
-            continue
+        # if y in parent_of:
+        #    continue
 
         parent_of[y] = x
         method_of[(x, y)] = r.get("method", "")
@@ -832,6 +832,203 @@ def plot_results_as_tree_like_last_panel(
         title=title,
         x_step=x_step,
         show_edge_labels=True,   # labels = method
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+def build_graph_edges_from_results(results, keep_first=True):
+    edges = []
+    method_of = {}
+
+    for r in results:
+        if not r.get("feasible", False):
+            continue
+        x = r.get("x", None)
+        y = r.get("y", None)
+        if x is None or y is None:
+            continue
+
+        e = (x, y)
+        if e not in method_of:
+            edges.append(e)
+            method_of[e] = r.get("method", "")
+        else:
+            if not keep_first:
+                method_of[e] = r.get("method", "")
+
+    return edges, method_of
+
+
+def plot_graph_bidirectional_from_threshold_on_ax(
+    ax,
+    stations_ranked,
+    threshold,
+    edges,
+    method_of=None,
+    station_name_map=None,
+    title="Graphe (depuis le threshold)",
+    x_step=2.6,
+    alternate_sides=True,
+    show_edge_labels=True,
+    left_x_rank=None,
+    left_x_name=None,
+):
+    if method_of is None:
+        method_of = {}
+
+    n = len(stations_ranked)
+    rank = {node: i for i, node in enumerate(stations_ranked)}
+    if threshold not in rank:
+        raise ValueError(f"threshold={threshold} absent de stations_ranked")
+
+    thr_i = rank[threshold]
+
+    # --- positions: threshold au centre, gauche pour "au-dessus", droite pour "en-dessous"
+    pos = {}
+    for i, node in enumerate(stations_ranked):
+        d = i - thr_i
+        # i < thr => d négatif => à gauche
+        # i > thr => d positif => à droite
+        x = d * x_step
+        y = -i
+        pos[node] = (x, y)
+
+    xs = [pos[node][0] for node in stations_ranked]
+    ys = [pos[node][1] for node in stations_ranked]
+
+    min_x = min(xs) if xs else 0.0
+    max_x = max(xs) if xs else 0.0
+
+    if left_x_rank is None:
+        left_x_rank = min_x - 1.6
+    if left_x_name is None:
+        left_x_name = min_x - 1.4
+
+    ax.set_title(title)
+    ax.axis("off")
+
+    # --- noeuds
+    ax.scatter(xs, ys, s=520, zorder=5, edgecolors="black", linewidths=0.8)
+
+    for node in stations_ranked:
+        x, y = pos[node]
+        ax.text(x, y, str(node), ha="center",
+                va="center", fontsize=11, zorder=6)
+
+    # rang + nom (colonne à gauche)
+    for i, node in enumerate(stations_ranked, start=1):
+        y = pos[node][1]
+        ax.text(left_x_rank, y, f"{i}", ha="right",
+                va="center", fontsize=10, zorder=6)
+        if station_name_map is not None and node in station_name_map:
+            ax.text(left_x_name, y, str(station_name_map[node]),
+                    ha="left", va="center", fontsize=10, zorder=6)
+
+    # --- filtrer edges qui existent dans le ranking
+    edges2 = [(u, v) for (u, v) in edges if (u in rank and v in rank)]
+
+    # tri cosmétique: sources plus haut d'abord
+    edges2.sort(key=lambda e: (rank[e[0]], rank[e[1]]))
+
+    # --- routage anti-chevauchement (par noeud source)
+    out_levels_right = defaultdict(int)
+    out_levels_left = defaultdict(int)
+    edge_level = {}
+
+    for (u, v) in edges2:
+        # côté dépend du signe de la position x de u (ou de son rang, comme toi)
+        if alternate_sides:
+            # petit hack: si u est à gauche du centre, on préfère router à gauche, sinon à droite
+            side = "left" if pos[u][0] < 0 else "right"
+        else:
+            side = "right"
+
+        if side == "right":
+            lvl = out_levels_right[u]
+            out_levels_right[u] += 1
+        else:
+            lvl = out_levels_left[u]
+            out_levels_left[u] += 1
+
+        edge_level[(u, v)] = (side, lvl)
+
+    def draw_arrow(u, v, color="green", alpha=0.85, lw=2.3, linestyle="-", zorder=3, label=None):
+        (x1, y1) = pos[u]
+        (x2, y2) = pos[v]
+        side, lvl = edge_level[(u, v)]
+
+        # offset latéral pour éviter superpositions d'arêtes sortantes
+        base = 0.00
+        step = 0.18
+        side_sign = 1 if side == "right" else -1
+        x_offset = (base + step * lvl) * side_sign
+
+        # petit offset au départ/arrivée
+        start = (x1 + 0.10, y1)
+        end = (x2 + 0.10, y2)
+
+        # courbure légère
+        rad_base = 0.18 + 0.03 * lvl
+        rad = rad_base if side == "right" else -rad_base
+
+        arrow = FancyArrowPatch(
+            start, end,
+            arrowstyle="-|>",
+            mutation_scale=14,
+            color=color,
+            linewidth=lw,
+            linestyle=linestyle,
+            alpha=alpha,
+            connectionstyle=f"arc3,rad={rad}",
+            zorder=zorder
+        )
+
+        tr = ax.transData + transforms.Affine2D().translate(x_offset, 0)
+        arrow.set_transform(tr)
+        ax.add_patch(arrow)
+
+        if show_edge_labels and label:
+            mx = start[0] + 0.5 * (end[0] - start[0])
+            my = start[1] + 0.8 * (end[1] - start[1])
+            ax.text(mx, my, str(label), transform=tr,
+                    ha="center", va="center", fontsize=15, zorder=zorder+1)
+
+    # --- edges
+    for (u, v) in edges2:
+        lab = method_of.get((u, v), None)
+        draw_arrow(u, v, color="green", label=lab)
+
+    # limites
+    ax.set_xlim(min_x - 2.2, max_x + 2.2)
+    ax.set_ylim(-n - 1, 1)
+
+
+def plot_results_as_bidirectional_graph_from_threshold(
+    stations_ranked,
+    results,
+    threshold,
+    station_name_map=None,
+    figsize=(18, 10),
+    title="Résultat (graphe bidirectionnel depuis threshold)",
+    x_step=2.6,
+    keep_first=True,
+):
+    edges, method_of = build_graph_edges_from_results(
+        results, keep_first=keep_first)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    plot_graph_bidirectional_from_threshold_on_ax(
+        ax,
+        stations_ranked=stations_ranked,
+        threshold=threshold,
+        edges=edges,
+        method_of=method_of,
+        station_name_map=station_name_map,
+        title=title,
+        x_step=x_step,
+        alternate_sides=True,
+        show_edge_labels=True,
     )
     plt.tight_layout()
     plt.show()
